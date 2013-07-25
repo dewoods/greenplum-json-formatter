@@ -1,0 +1,5 @@
+1|JSON object does not contain value for 'id'|{ "idx": 2, "t": "2abc", "f4": 2.4, "f8": 2.8 }
+2|Wrong data type for column 'id', expected number|{ "id": "3", "t": "3abc", "f4": 3.4, "f8": 3.8 }
+4|Wrong data type for column 'f4', expected float4|{ "id": 5, "t": "5abc", "f4": "5.4", "f8": 5.8 }
+5|Wrong data type for column 'f8', expected float8|{ "id": 6, "t": "6abc", "f4": 6.4, "f8": "6.8" }
+6|Wrong data type for column 't', expected text|{ "id": 7, "t": 1, "f4": 7.4, "f8": 7.8 }

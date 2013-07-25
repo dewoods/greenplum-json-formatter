@@ -1,0 +1,3 @@
+24|JSON object does not contain value for 'id'|{"delete":{"status":{"user_id_str":"216327976","id_str":"104644726506012672","id":104644726506012672,"user_id":216327976}}}
+70|JSON object does not contain value for 'id'|{"delete":{"status":{"user_id_str":"201627587","id_str":"81109400454053888","id":81109400454053888,"user_id":201627587}}}
+103|JSON object does not contain value for 'id'|{"delete":{"status":{"user_id_str":"105273308","id_str":"104648547512762368","id":104648547512762368,"user_id":105273308}}}
