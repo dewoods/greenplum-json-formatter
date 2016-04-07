@@ -128,7 +128,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
             FORMATTER_RETURN_NOTIFICATION( fcinfo, FMT_NEED_MORE_DATA );
         }
 
-        if( data_buf[data_cur] == ' ' 
+        if( data_buf[data_cur] == ' '
             || data_buf[data_cur] == ','
             || data_buf[data_cur] == '\n'
             || data_buf[data_cur] == '\r'
@@ -190,7 +190,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         elog( ERROR, "Could not parse JSON object" );
     }
 
-    data_cur += user_ctx->j_len; 
+    data_cur += user_ctx->j_len;
     user_ctx->j_counter = 0;
 
     /**
@@ -319,6 +319,24 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
                 }
                 break;
             }
+            case BOOLOID:
+            {
+              if( json_is_null(val) ){
+                user_ctx->nulls[i] = true;
+              } else if( !json_is_boolean( val ) ) {
+                  MemoryContextSwitchTo( omc );
+                  FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
+                  FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
+                  ereport( ERROR, (
+                      errcode( ERRCODE_DATA_EXCEPTION ),
+                      errmsg( "Wrong data type for column '%s', expected boolean", tupdesc->attrs[i]->attname.data )
+                  ) );
+              } else {
+                user_ctx->values[i] = json_is_true( val );
+                user_ctx->nulls[i] = false;
+              }
+              break;
+            }
             default:
             {
                 MemoryContextSwitchTo( omc );
@@ -400,7 +418,7 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
                 if( !user_ctx->j_vals[i] ) {
                     //generic objects will be replaced later if necessary
                     user_ctx->j_vals[i] = json_object();
-                    ret = json_object_set( j_parent, jobjname, user_ctx->j_vals[i] ); 
+                    ret = json_object_set( j_parent, jobjname, user_ctx->j_vals[i] );
                     if( ret < 0 ) {
                         elog( ERROR, "Failed to append nested JSON object" );
                     }
@@ -409,7 +427,7 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
                 //keep a pointer to the current sub-object name
                 pjobjname = jobjname;
             }
-            
+
             switch( type ) {
                 case INT2OID:
                 case INT4OID:
@@ -442,13 +460,22 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
 
                     break;
                 }
+                case BOOLOID:
+                {
+                  user_ctx->j_vals[i] = json_boolean(0);
+                  if( user_ctx->j_vals[i] == NULL ) {
+                      elog( ERROR, "Could not initialize json boolean" );
+                  }
+
+                  break;
+                }
                 default:
                 {
                     elog( ERROR, "Type not supported" );
                 }
             }
 
-            ret = json_object_set( j_parent, pjobjname, user_ctx->j_vals[i] ); 
+            ret = json_object_set( j_parent, pjobjname, user_ctx->j_vals[i] );
             if( ret < 0 ) {
                 elog( ERROR, "Failed to append to JSON object" );
             }
@@ -483,7 +510,7 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
     for( i=0; i < ncolumns; i++ ) {
         Oid     type = tupdesc->attrs[i]->atttypid;
         int     ret = 0;
-        
+
         switch( type ) {
             case INT2OID:
             case INT4OID:
@@ -545,13 +572,13 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
                 } else {
                     value = DatumGetCString( DirectFunctionCall1( textout, user_ctx->dbvalues[i] ) );
                 }
-                
+
                 ret = json_string_set( user_ctx->j_vals[i], value );
                 if( ret < 0 ) {
                     MemoryContextSwitchTo( omc );
                     elog( ERROR, "Unable to set string value for column '%s'", tupdesc->attrs[i]->attname.data );
                 }
-                
+
                 break;
             }
             default:
