@@ -35,6 +35,7 @@ typedef struct {
     json_error_t    *j_error;
     int             j_len;
     int             j_counter;
+    bool            j_quotation_opened;
     int             j_cursor;
     int             rownum;
 } user_read_ctx_t;
@@ -87,6 +88,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         user_ctx->j_error = palloc( sizeof(json_error_t) );
         user_ctx->j_len = 0;
         user_ctx->j_counter = 0;
+        user_ctx->j_quotation_opened = false;
         user_ctx->j_cursor = 0;
         user_ctx->rownum = 0;
 
@@ -109,6 +111,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
     omc = MemoryContextSwitchTo( mc );
 
     char c;
+    char pc;
     int length = 0;
 
     //elog( NOTICE, "data buffer -> ncols: %d, len: %d, cur: %d - %hhd", ncols, data_len, data_cur, data_buf[data_cur] );
@@ -160,7 +163,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
                 FORMATTER_SET_BAD_ROW_DATA( fcinfo, data_buf+data_cur, length );
                 ereport( ERROR, (
                     errcode( ERRCODE_DATA_EXCEPTION ),
-                    errmsg( "Invalid JSON object" )
+                    errmsg( "Invalid JSON object user_ctx->j_counter: %d data_cur: %d, length: %d, user_ctx->rownum: %d data_len: %d data_buf+data_cur: %s", user_ctx->j_counter, data_cur, length, user_ctx->rownum,  data_len , data_buf+data_cur)
                 ) );
             } else {
                 FORMATTER_RETURN_NOTIFICATION( fcinfo, FMT_NEED_MORE_DATA );
@@ -168,12 +171,18 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         }
 
         c = data_buf[data_cur + length];
+        pc = data_buf[data_cur + length - 1];
 
-        if( c == '{' )
+        if(c == '"' && pc != '\\') {
+          user_ctx->j_quotation_opened = !user_ctx->j_quotation_opened;
+        }
+        if (!user_ctx->j_quotation_opened) {
+          if( c == '{') {
             user_ctx->j_counter++;
-        else if( c == '}' )
+          } else if( c == '}' ) {
             user_ctx->j_counter--;
-
+          }
+        }
         length++;
     }
 
