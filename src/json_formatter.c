@@ -35,6 +35,7 @@ typedef struct {
     json_error_t    *j_error;
     int             j_len;
     int             j_counter;
+    bool            j_quotation_opened;
     int             j_cursor;
     int             rownum;
 } user_read_ctx_t;
@@ -87,6 +88,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         user_ctx->j_error = palloc( sizeof(json_error_t) );
         user_ctx->j_len = 0;
         user_ctx->j_counter = 0;
+        user_ctx->j_quotation_opened = false;
         user_ctx->j_cursor = 0;
         user_ctx->rownum = 0;
 
@@ -109,6 +111,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
     omc = MemoryContextSwitchTo( mc );
 
     char c;
+    char pc;
     int length = 0;
 
     //elog( NOTICE, "data buffer -> ncols: %d, len: %d, cur: %d - %hhd", ncols, data_len, data_cur, data_buf[data_cur] );
@@ -128,7 +131,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
             FORMATTER_RETURN_NOTIFICATION( fcinfo, FMT_NEED_MORE_DATA );
         }
 
-        if( data_buf[data_cur] == ' ' 
+        if( data_buf[data_cur] == ' '
             || data_buf[data_cur] == ','
             || data_buf[data_cur] == '\n'
             || data_buf[data_cur] == '\r'
@@ -160,7 +163,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
                 FORMATTER_SET_BAD_ROW_DATA( fcinfo, data_buf+data_cur, length );
                 ereport( ERROR, (
                     errcode( ERRCODE_DATA_EXCEPTION ),
-                    errmsg( "Invalid JSON object" )
+                    errmsg( "Invalid JSON object user_ctx->j_counter: %d data_cur: %d, length: %d, user_ctx->rownum: %d data_len: %d data_buf+data_cur: %s", user_ctx->j_counter, data_cur, length, user_ctx->rownum,  data_len , data_buf+data_cur)
                 ) );
             } else {
                 FORMATTER_RETURN_NOTIFICATION( fcinfo, FMT_NEED_MORE_DATA );
@@ -168,12 +171,18 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         }
 
         c = data_buf[data_cur + length];
+        pc = data_buf[data_cur + length - 1];
 
-        if( c == '{' )
+        if(c == '"' && pc != '\\') {
+          user_ctx->j_quotation_opened = !user_ctx->j_quotation_opened;
+        }
+        if (!user_ctx->j_quotation_opened) {
+          if( c == '{') {
             user_ctx->j_counter++;
-        else if( c == '}' )
+          } else if( c == '}' ) {
             user_ctx->j_counter--;
-
+          }
+        }
         length++;
     }
 
@@ -190,7 +199,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         elog( ERROR, "Could not parse JSON object" );
     }
 
-    data_cur += user_ctx->j_len; 
+    data_cur += user_ctx->j_len;
     user_ctx->j_counter = 0;
 
     /**
@@ -216,17 +225,17 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         /**
          * If the db col name contains periods, traverse the JSON object to find the correct sub-element
          */
+        bool this_obj_is_null = false;
+
         while( (jobjname = strsep( &dbcolname, "." )) != NULL ) {
             val = json_object_get( val, jobjname );
             if( !val ) {
-                MemoryContextSwitchTo( omc );
-                FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
-                FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
-                ereport( ERROR, (
-                    errcode( ERRCODE_DATA_EXCEPTION ),
-                    errmsg( "JSON object does not contain value for '%s'", tupdesc->attrs[i]->attname.data )
-                ) );
+              val = json_object();
+              this_obj_is_null = true;
             }
+        }
+        if ( this_obj_is_null ) {
+          val = json_null();
         }
         free( tofree );
 
@@ -238,7 +247,9 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
             case INT4OID:
             case INT8OID:
             {
-                if( !json_is_integer( val ) ) {
+                if( json_is_null(val) ){
+                  user_ctx->nulls[i] = true;
+                } else if( !json_is_integer( val ) ) {
                     MemoryContextSwitchTo( omc );
                     FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
                     FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
@@ -246,13 +257,16 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
                         errcode( ERRCODE_DATA_EXCEPTION ),
                         errmsg( "Wrong data type for column '%s', expected number", tupdesc->attrs[i]->attname.data )
                     ) );
+                } else {
+                  user_ctx->values[i] = (Datum)json_integer_value( val );
+                  user_ctx->nulls[i] = false;
                 }
-                user_ctx->values[i] = (Datum)json_integer_value( val );
-                user_ctx->nulls[i] = false;
                 break;
             }
             case FLOAT4OID:
-                if( !json_is_real( val ) ) {
+                if( json_is_null(val) ) {
+                  user_ctx->nulls[i] = true;
+                } else if( !json_is_real( val ) ) {
                     MemoryContextSwitchTo( omc );
                     FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
                     FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
@@ -260,13 +274,17 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
                         errcode( ERRCODE_DATA_EXCEPTION ),
                         errmsg( "Wrong data type for column '%s', expected float4", tupdesc->attrs[i]->attname.data )
                     ) );
+                } else {
+                  user_ctx->values[i] = Float4GetDatum( json_real_value( val ) );
+                  user_ctx->nulls[i] = false;
                 }
-                user_ctx->values[i] = Float4GetDatum( json_real_value( val ) );
-                user_ctx->nulls[i] = false;
+
                 break;
             case FLOAT8OID:
             {
-                if( !json_is_real( val ) ) {
+                if( json_is_null(val) ) {
+                  user_ctx->nulls[i] = true;
+                } else if( !json_is_real( val ) ) {
                     MemoryContextSwitchTo( omc );
                     FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
                     FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
@@ -274,9 +292,11 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
                         errcode( ERRCODE_DATA_EXCEPTION ),
                         errmsg( "Wrong data type for column '%s', expected float8", tupdesc->attrs[i]->attname.data )
                     ) );
+                } else {
+                  user_ctx->values[i] = Float8GetDatum( json_real_value( val ) );
+                  user_ctx->nulls[i] = false;
                 }
-                user_ctx->values[i] = Float8GetDatum( json_real_value( val ) );
-                user_ctx->nulls[i] = false;
+
                 break;
             }
             case TEXTOID:
@@ -284,26 +304,47 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
             {
                 const char  *strval;
                 text        *txtval;
+                if( json_is_null(val) ) {
+                  user_ctx->nulls[i] = true;
+                } else {
 
-                if( !json_is_string( val ) ) {
-                    MemoryContextSwitchTo( omc );
-                    FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
-                    FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
-                    ereport( ERROR, (
-                        errcode( ERRCODE_DATA_EXCEPTION ),
-                        errmsg( "Wrong data type for column '%s', expected text", tupdesc->attrs[i]->attname.data )
-                    ) );
+                  switch (json_typeof(val)) {
+                    case JSON_STRING:
+                      strval = json_string_value( val );
+                    break;
+
+                    default:
+                      strval = json_dumps( val , 0);
+                    break;
+                  }
+
+
+                  txtval = palloc( strlen( strval ) + VARHDRSZ );
+                  SET_VARSIZE( txtval, strlen(strval) + VARHDRSZ );
+                  memcpy( VARDATA(txtval), strval, strlen(strval) );
+
+                  user_ctx->values[i] = PointerGetDatum( txtval );
+                  user_ctx->nulls[i] = false;
                 }
-                strval = json_string_value( val );
-
-                txtval = palloc( strlen( strval ) + VARHDRSZ );
-                SET_VARSIZE( txtval, strlen(strval) + VARHDRSZ );
-                memcpy( VARDATA(txtval), strval, strlen(strval) );
-
-                user_ctx->values[i] = PointerGetDatum( txtval );
-                user_ctx->nulls[i] = false;
-
                 break;
+            }
+            case BOOLOID:
+            {
+              if( json_is_null(val) ){
+                user_ctx->nulls[i] = true;
+              } else if( !json_is_boolean( val ) ) {
+                  MemoryContextSwitchTo( omc );
+                  FORMATTER_SET_BAD_ROW_NUM( fcinfo, user_ctx->rownum );
+                  FORMATTER_SET_BAD_ROW_DATA( fcinfo, user_ctx->j_buf, user_ctx->j_len );
+                  ereport( ERROR, (
+                      errcode( ERRCODE_DATA_EXCEPTION ),
+                      errmsg( "Wrong data type for column '%s', expected boolean", tupdesc->attrs[i]->attname.data )
+                  ) );
+              } else {
+                user_ctx->values[i] = json_is_true( val );
+                user_ctx->nulls[i] = false;
+              }
+              break;
             }
             default:
             {
@@ -386,7 +427,7 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
                 if( !user_ctx->j_vals[i] ) {
                     //generic objects will be replaced later if necessary
                     user_ctx->j_vals[i] = json_object();
-                    ret = json_object_set( j_parent, jobjname, user_ctx->j_vals[i] ); 
+                    ret = json_object_set( j_parent, jobjname, user_ctx->j_vals[i] );
                     if( ret < 0 ) {
                         elog( ERROR, "Failed to append nested JSON object" );
                     }
@@ -395,7 +436,7 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
                 //keep a pointer to the current sub-object name
                 pjobjname = jobjname;
             }
-            
+
             switch( type ) {
                 case INT2OID:
                 case INT4OID:
@@ -428,13 +469,22 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
 
                     break;
                 }
+                case BOOLOID:
+                {
+                  user_ctx->j_vals[i] = json_boolean(0);
+                  if( user_ctx->j_vals[i] == NULL ) {
+                      elog( ERROR, "Could not initialize json boolean" );
+                  }
+
+                  break;
+                }
                 default:
                 {
                     elog( ERROR, "Type not supported" );
                 }
             }
 
-            ret = json_object_set( j_parent, pjobjname, user_ctx->j_vals[i] ); 
+            ret = json_object_set( j_parent, pjobjname, user_ctx->j_vals[i] );
             if( ret < 0 ) {
                 elog( ERROR, "Failed to append to JSON object" );
             }
@@ -469,7 +519,7 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
     for( i=0; i < ncolumns; i++ ) {
         Oid     type = tupdesc->attrs[i]->atttypid;
         int     ret = 0;
-        
+
         switch( type ) {
             case INT2OID:
             case INT4OID:
@@ -531,13 +581,13 @@ json_formatter_write( PG_FUNCTION_ARGS ) {
                 } else {
                     value = DatumGetCString( DirectFunctionCall1( textout, user_ctx->dbvalues[i] ) );
                 }
-                
+
                 ret = json_string_set( user_ctx->j_vals[i], value );
                 if( ret < 0 ) {
                     MemoryContextSwitchTo( omc );
                     elog( ERROR, "Unable to set string value for column '%s'", tupdesc->attrs[i]->attname.data );
                 }
-                
+
                 break;
             }
             default:
