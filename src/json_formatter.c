@@ -6,6 +6,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include "jansson.h"
 
 #include "postgres.h"
@@ -60,6 +61,7 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
     int             data_len;
     int             ncols = 0;
     int             i=0;
+    bool previousSlash = false;
 
     if( !CALLED_AS_FORMATTER( fcinfo ) )
         elog( ERROR, "json_formatter_read: not called by format manager" );
@@ -96,6 +98,9 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         FORMATTER_SET_USER_CTX( fcinfo, user_ctx );
     } else {
         user_ctx->rownum++;
+        // Reset the counter and quotation opened flags
+        user_ctx->j_counter=0;
+        user_ctx->j_quotation_opened = false;
     }
 
     /**
@@ -111,7 +116,6 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
     omc = MemoryContextSwitchTo( mc );
 
     char c;
-    char pc;
     int length = 0;
 
     //elog( NOTICE, "data buffer -> ncols: %d, len: %d, cur: %d - %hhd", ncols, data_len, data_cur, data_buf[data_cur] );
@@ -120,10 +124,11 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         MemoryContextSwitchTo( omc );
         FORMATTER_RETURN_NOTIFICATION( fcinfo, FMT_NEED_MORE_DATA );
     }
-
+    
     /**
      * Scan to beginning of JSON object
      */
+    
     while( user_ctx->j_counter == 0 ) {
         if( data_cur == data_len ) {
             FORMATTER_SET_DATACURSOR( fcinfo, data_cur );
@@ -171,17 +176,35 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
         }
 
         c = data_buf[data_cur + length];
-        pc = data_buf[data_cur + length - 1];
-
-        if(c == '"' && pc != '\\') {
-          user_ctx->j_quotation_opened = !user_ctx->j_quotation_opened;
-        }
-        if (!user_ctx->j_quotation_opened) {
+        if (c=='u' ) {
+          // Remove \u0000 unicode characters from the stream, replace with spaces
+          if (previousSlash && data_cur + length + 4 < data_len) {
+            if (data_buf[data_cur + length + 1]=='0' && data_buf[data_cur + length + 2]=='0' &&
+                data_buf[data_cur + length + 3]=='0' && data_buf[data_cur + length + 4]=='0' ) {
+              data_buf[data_cur + length - 1] = ' ';
+              data_buf[data_cur + length]     = ' ';
+              data_buf[data_cur + length + 1] = ' ';
+              data_buf[data_cur + length + 2] = ' ';
+              data_buf[data_cur + length + 3] = ' ';
+              data_buf[data_cur + length + 4] = ' ';
+            }
+          }
+        } else if (c == '"') {
+          if (!previousSlash) {
+            user_ctx->j_quotation_opened = !user_ctx->j_quotation_opened;
+          }          
+        } else if (c == '\\') {
+          previousSlash = !previousSlash;          
+        } else if (!user_ctx->j_quotation_opened) {
           if( c == '{') {
             user_ctx->j_counter++;
           } else if( c == '}' ) {
             user_ctx->j_counter--;
           }
+        }
+        // Always reset escape if the current character is not an escape value.
+        if (previousSlash && c != '\\') {
+          previousSlash = false;          
         }
         length++;
     }
@@ -189,11 +212,11 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
     user_ctx->j_len = length;
     memcpy( user_ctx->j_buf, data_buf+data_cur, user_ctx->j_len );
 
-    //elog( NOTICE, "Complete str: %d:%s", user_ctx->j_len, user_ctx->j_buf+4600 );
+    //elog( NOTICE, "Complete str: %d:%s", user_ctx->j_len, user_ctx->j_buf );
 
     user_ctx->j_root = json_loadb( user_ctx->j_buf, user_ctx->j_len, 0, user_ctx->j_error );
     if( !user_ctx->j_root ) {
-        elog( ERROR, "Could not parse JSON string" );
+        elog( ERROR, "Could not parse JSON string error: on line %d: %s\n", ( *user_ctx->j_error).line, ( *user_ctx->j_error).text);
     }
     if( !json_is_object(user_ctx->j_root) ) {
         elog( ERROR, "Could not parse JSON object" );
@@ -208,8 +231,11 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
     for( i=0; i < ncols; i++ ) {
         Oid         type    = tupdesc->attrs[i]->atttypid;
         json_t      *val;
+        json_t      *oldval;
         char        *dbcolname, *tofree;
         char        *jobjname;
+        const char *key;
+        json_t *value;
 
         /**
          * copy the name of the current database column, to be passed to strsep(3)
@@ -226,9 +252,19 @@ json_formatter_read( PG_FUNCTION_ARGS ) {
          * If the db col name contains periods, traverse the JSON object to find the correct sub-element
          */
         bool this_obj_is_null = false;
-
+    
         while( (jobjname = strsep( &dbcolname, "." )) != NULL ) {
+            oldval = val;
             val = json_object_get( val, jobjname );
+            
+            // Do a case insensitive search for the key, maybe set this as a configurable option
+            if( !val ) {
+              json_object_foreach(oldval, key, value) {
+                  if (strcasecmp(key, jobjname) == 0) {
+                    val = value;
+                  }
+              }
+            }
             if( !val ) {
               val = json_object();
               this_obj_is_null = true;
